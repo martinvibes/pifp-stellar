@@ -237,6 +237,11 @@ fn decode_data(value: &Value, kind: &EventKind) -> (Option<String>, Option<Strin
             let amount = extract_field(value, &["amount"]);
             (actor, amount)
         }
+        EventKind::ProjectActive | EventKind::ProjectExpired => (None, None),
+        EventKind::ProjectCancelled => {
+            let actor = extract_field(value, &["cancelled_by", "address"]);
+            (actor, None)
+        }
         EventKind::ProjectVerified => {
             let actor = extract_field(value, &["oracle", "verifier", "address"]);
             (actor, None)

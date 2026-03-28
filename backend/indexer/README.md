@@ -37,6 +37,9 @@ The indexer reads configuration from environment variables. You can supply these
 | `POLL_INTERVAL_SECS` | How often (in seconds) to poll the RPC for events. | `5` | No |
 | `EVENTS_PER_PAGE` | Maximum number of events to fetch per RPC pagination slice. | `100` | No |
 | `START_LEDGER` | The ledger to start syncing from if no cursor is saved in the DB yet. | `0` | No |
+| `REDIS_URL` | Optional Redis URL for API response caching. If unset, caching is disabled. | *None* | No |
+| `CACHE_TTL_TOP_PROJECTS_SECS` | TTL for cached `GET /projects/top` responses. | `30` | No |
+| `CACHE_TTL_ACTIVE_PROJECTS_COUNT_SECS` | TTL for cached `GET /projects/active/count` response. | `15` | No |
 
 ## 🏗️ Architecture & Database
 
@@ -73,11 +76,23 @@ In parallel to the background indexing daemon, an Axum web server runs to expose
 - `GET /health` : Returns server operational status and application version.
 - `GET /events` : List all indexed events across the entire protocol.
 - `GET /projects/:id/events` : Query historical events specifically generated for `project_id`.
+- `GET /projects/top?limit=10` : Top funded projects ranked by indexed `project_funded` events (cached when Redis is configured).
+- `GET /projects/active/count` : Current active projects count inferred from latest status events (`project_active`, `project_verified`, `project_expired`, `project_cancelled`) (cached when Redis is configured).
 
 **Quorum / Oracle Endpoints:**
 - `POST /admin/quorum` : Update the global quorum threshold (expects a `{ threshold: u32 }` JSON payload).
 - `POST /projects/:id/vote` : Submit an oracle vote (expects a `{ oracle: string, proof_hash: string }` JSON payload).
 - `GET /projects/:id/quorum` : Returns the active vote count vs existing threshold for the given project.
+
+## 🧠 Caching Behavior
+
+When `REDIS_URL` is provided, the API stores frequent response payloads in Redis:
+- `GET /projects/top` uses a versioned key based on `limit` + cache version.
+- `GET /projects/active/count` uses a versioned key based on cache version.
+
+On each successful indexing batch that inserts new events, the indexer bumps a global cache version key in Redis. This invalidates previous cached entries without key scans.
+
+If Redis is unavailable (startup or runtime), requests automatically fall back to SQLite queries and continue serving responses.
 
 ## 🔧 Troubleshooting
 

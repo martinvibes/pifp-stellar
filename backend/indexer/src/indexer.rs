@@ -8,6 +8,7 @@ use reqwest::Client;
 use sqlx::SqlitePool;
 use tracing::{error, info};
 
+use crate::cache::Cache;
 use crate::config::Config;
 use crate::db;
 use crate::rpc;
@@ -16,6 +17,7 @@ pub struct IndexerState {
     pub pool: SqlitePool,
     pub config: Config,
     pub client: Client,
+    pub cache: Option<Cache>,
 }
 
 /// Spawn the indexer loop as a background [`tokio`] task.
@@ -40,6 +42,7 @@ pub async fn run(state: Arc<IndexerState>) {
             &state.pool,
             &state.client,
             &state.config,
+            state.cache.as_ref(),
             current_ledger,
             cursor.as_deref(),
         )
@@ -65,6 +68,7 @@ async fn poll_once(
     pool: &SqlitePool,
     client: &Client,
     config: &Config,
+    cache: Option<&Cache>,
     start_ledger: u32,
     cursor: Option<&str>,
 ) -> crate::errors::Result<(u32, Option<String>)> {
@@ -86,6 +90,11 @@ async fn poll_once(
             raw_events.len(),
             inserted
         );
+        if inserted > 0 {
+            if let Some(cache) = cache {
+                cache.invalidate_all().await;
+            }
+        }
     }
 
     // Advance the ledger cursor:

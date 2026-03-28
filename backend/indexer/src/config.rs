@@ -18,6 +18,12 @@ pub struct Config {
     pub events_per_page: u32,
     /// Ledger to start from if no cursor is saved
     pub start_ledger: u32,
+    /// Optional Redis endpoint used for API response caching
+    pub redis_url: Option<String>,
+    /// TTL for top projects cache entries (seconds)
+    pub cache_ttl_top_projects_secs: u64,
+    /// TTL for active projects count cache entries (seconds)
+    pub cache_ttl_active_projects_count_secs: u64,
 }
 
 impl Config {
@@ -46,6 +52,21 @@ impl Config {
                 .unwrap_or_else(|_| "0".to_string())
                 .parse()
                 .map_err(|_| IndexerError::Config("Invalid START_LEDGER".to_string()))?,
+            redis_url: std::env::var("REDIS_URL")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            cache_ttl_top_projects_secs: env_var("CACHE_TTL_TOP_PROJECTS_SECS")
+                .unwrap_or_else(|_| "30".to_string())
+                .parse()
+                .map_err(|_| {
+                    IndexerError::Config("Invalid CACHE_TTL_TOP_PROJECTS_SECS".to_string())
+                })?,
+            cache_ttl_active_projects_count_secs: env_var("CACHE_TTL_ACTIVE_PROJECTS_COUNT_SECS")
+                .unwrap_or_else(|_| "15".to_string())
+                .parse()
+                .map_err(|_| {
+                    IndexerError::Config("Invalid CACHE_TTL_ACTIVE_PROJECTS_COUNT_SECS".to_string())
+                })?,
         })
     }
 }

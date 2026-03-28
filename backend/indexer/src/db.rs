@@ -1,6 +1,6 @@
 //! Database layer — migrations, queries, and cursor management.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
 use tracing::info;
 
@@ -135,6 +135,70 @@ pub async fn get_all_events(pool: &SqlitePool) -> Result<Vec<EventRecord>> {
     Ok(rows)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct TopProject {
+    pub project_id: String,
+    pub total_funded: i64,
+    pub donation_events: i64,
+}
+
+/// Return top projects ranked by total funded amount from indexed funding events.
+pub async fn get_top_projects(pool: &SqlitePool, limit: u32) -> Result<Vec<TopProject>> {
+    let capped_limit = limit.clamp(1, 100) as i64;
+    let rows = sqlx::query_as::<_, TopProject>(
+        r#"
+        SELECT
+            project_id,
+            COALESCE(SUM(CAST(amount AS INTEGER)), 0) AS total_funded,
+            COUNT(*) AS donation_events
+        FROM events
+        WHERE event_type = 'project_funded'
+          AND project_id IS NOT NULL
+        GROUP BY project_id
+        ORDER BY total_funded DESC, donation_events DESC, project_id ASC
+        LIMIT ?1
+        "#,
+    )
+    .bind(capped_limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Return the current number of active projects inferred from latest status events.
+pub async fn get_active_projects_count(pool: &SqlitePool) -> Result<i64> {
+    let row: (i64,) = sqlx::query_as(
+        r#"
+        WITH status_events AS (
+            SELECT project_id, event_type, ledger, id
+            FROM events
+            WHERE project_id IS NOT NULL
+              AND event_type IN (
+                  'project_active',
+                  'project_verified',
+                  'project_expired',
+                  'project_cancelled'
+              )
+        ),
+        ranked AS (
+            SELECT
+                project_id,
+                event_type,
+                ROW_NUMBER() OVER (
+                    PARTITION BY project_id
+                    ORDER BY ledger DESC, id DESC
+                ) AS rn
+            FROM status_events
+        )
+        SELECT COUNT(*) FROM ranked
+        WHERE rn = 1 AND event_type = 'project_active'
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(row.0)
+}
+
 // ─────────────────────────────────────────────────────────
 // Quorum management
 // ─────────────────────────────────────────────────────────
@@ -232,6 +296,32 @@ mod tests {
         // Run migrations manually from the migrations folder
         // For simplicity in unit tests, we can just run the specific DDL
         sqlx::query(
+            "CREATE TABLE events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                project_id TEXT,
+                actor TEXT,
+                amount TEXT,
+                ledger INTEGER NOT NULL,
+                timestamp INTEGER NOT NULL,
+                contract_id TEXT NOT NULL,
+                tx_hash TEXT,
+                created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+            );",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("CREATE INDEX idx_events_project_id ON events (project_id);")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE INDEX idx_events_event_type ON events (event_type);")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        sqlx::query(
             "CREATE TABLE quorum_settings (id INTEGER PRIMARY KEY CHECK (id = 1), threshold INTEGER NOT NULL DEFAULT 1);",
         ).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO quorum_settings (id, threshold) VALUES (1, 1);")
@@ -255,6 +345,92 @@ mod tests {
         // Update to 3
         set_quorum_threshold(&pool, 3).await.unwrap();
         assert_eq!(get_quorum_threshold(&pool).await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_get_top_projects() {
+        let pool = setup_test_db().await;
+        sqlx::query("INSERT INTO events (event_type, project_id, amount, ledger, timestamp, contract_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")
+            .bind("project_funded")
+            .bind("1")
+            .bind("100")
+            .bind(1i64)
+            .bind(1i64)
+            .bind("c")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO events (event_type, project_id, amount, ledger, timestamp, contract_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")
+            .bind("project_funded")
+            .bind("2")
+            .bind("300")
+            .bind(2i64)
+            .bind(2i64)
+            .bind("c")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO events (event_type, project_id, amount, ledger, timestamp, contract_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")
+            .bind("project_funded")
+            .bind("1")
+            .bind("50")
+            .bind(3i64)
+            .bind(3i64)
+            .bind("c")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let top = get_top_projects(&pool, 10).await.unwrap();
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0].project_id, "2");
+        assert_eq!(top[0].total_funded, 300);
+        assert_eq!(top[1].project_id, "1");
+        assert_eq!(top[1].total_funded, 150);
+    }
+
+    #[tokio::test]
+    async fn test_get_active_projects_count() {
+        let pool = setup_test_db().await;
+        sqlx::query("INSERT INTO events (event_type, project_id, ledger, timestamp, contract_id) VALUES (?1, ?2, ?3, ?4, ?5)")
+            .bind("project_active")
+            .bind("1")
+            .bind(10i64)
+            .bind(10i64)
+            .bind("c")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO events (event_type, project_id, ledger, timestamp, contract_id) VALUES (?1, ?2, ?3, ?4, ?5)")
+            .bind("project_active")
+            .bind("2")
+            .bind(10i64)
+            .bind(10i64)
+            .bind("c")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO events (event_type, project_id, ledger, timestamp, contract_id) VALUES (?1, ?2, ?3, ?4, ?5)")
+            .bind("project_verified")
+            .bind("2")
+            .bind(11i64)
+            .bind(11i64)
+            .bind("c")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO events (event_type, project_id, ledger, timestamp, contract_id) VALUES (?1, ?2, ?3, ?4, ?5)")
+            .bind("project_cancelled")
+            .bind("3")
+            .bind(12i64)
+            .bind(12i64)
+            .bind("c")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let count = get_active_projects_count(&pool).await.unwrap();
+        assert_eq!(count, 1);
     }
 
     #[tokio::test]
