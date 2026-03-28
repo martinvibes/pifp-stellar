@@ -12,6 +12,7 @@ mod errors;
 mod events;
 mod indexer;
 mod rpc;
+mod webhook;
 
 use std::sync::Arc;
 
@@ -90,6 +91,8 @@ async fn main() -> anyhow::Result<()> {
             "/projects/active/count",
             get(api::get_active_projects_count),
         )
+        .route("/webhooks", post(api::register_webhook))
+        .route("/webhooks", get(api::list_webhooks))
         .route("/admin/quorum", post(api::set_quorum_threshold))
         .route("/projects/:id/vote", post(api::submit_vote))
         .route("/projects/:id/quorum", get(api::get_project_quorum))

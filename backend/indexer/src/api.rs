@@ -85,6 +85,13 @@ pub struct ActiveProjectsCountResponse {
     pub count: i64,
 }
 
+#[derive(Deserialize)]
+pub struct RegisterWebhookRequest {
+    pub url: String,
+    pub secret: String,
+    pub event_types: Vec<String>,
+}
+
 // ─────────────────────────────────────────────────────────
 // Handlers
 // ─────────────────────────────────────────────────────────
@@ -303,6 +310,66 @@ pub async fn get_active_projects_count(State(state): State<Arc<ApiState>>) -> im
             }
             (StatusCode::OK, Json(payload)).into_response()
         }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!(ErrorResponse {
+                error: e.to_string()
+            })),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /webhooks`
+///
+/// Register a webhook endpoint and subscribed event types.
+pub async fn register_webhook(
+    State(state): State<Arc<ApiState>>,
+    Json(payload): Json<RegisterWebhookRequest>,
+) -> impl IntoResponse {
+    if !(payload.url.starts_with("http://") || payload.url.starts_with("https://")) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!(ErrorResponse {
+                error: "Webhook URL must start with http:// or https://".to_string()
+            })),
+        )
+            .into_response();
+    }
+    if payload.secret.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!(ErrorResponse {
+                error: "Webhook secret cannot be empty".to_string()
+            })),
+        )
+            .into_response();
+    }
+
+    let registration = db::NewWebhookRegistration {
+        url: payload.url,
+        secret: payload.secret,
+        event_types: payload.event_types,
+    };
+
+    match db::create_webhook(&state.pool, &registration).await {
+        Ok(webhook) => (StatusCode::CREATED, Json(webhook)).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!(ErrorResponse {
+                error: e.to_string()
+            })),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /webhooks`
+///
+/// List all registered webhooks and subscriptions.
+pub async fn list_webhooks(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
+    match db::list_webhooks(&state.pool).await {
+        Ok(webhooks) => (StatusCode::OK, Json(webhooks)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!(ErrorResponse {
