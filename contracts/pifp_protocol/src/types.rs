@@ -64,13 +64,18 @@ pub struct ProjectConfig {
 
 /// Mutable project state, updated on deposits and verification.
 ///
-/// Kept small (~20 bytes) so that frequent writes (deposits) are cheap.
+/// Kept small so that frequent writes (deposits) are cheap.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectState {
     pub status: ProjectStatus,
     /// Count of unique (donator, token) pairs that have deposited.
     pub donation_count: u32,
+    /// Ledger timestamp after which donors can no longer refund and the
+    /// creator may reclaim unclaimed funds.  Set to `deadline + REFUND_WINDOW`
+    /// when the project transitions to Expired, or `cancel_time + REFUND_WINDOW`
+    /// when cancelled.  Zero while the project is still in a non-terminal state.
+    pub refund_expiry: u64,
 }
 
 /// Full on-chain representation of a funding project.
@@ -100,6 +105,9 @@ pub struct Project {
     /// Count of unique (token, donator) pairs that have donated.
     /// Informational; incremented on each new deposit.
     pub donation_count: u32,
+    /// Ledger timestamp after which donors can no longer refund and the
+    /// creator may reclaim unclaimed funds.  Zero while non-terminal.
+    pub refund_expiry: u64,
 }
 
 impl Project {

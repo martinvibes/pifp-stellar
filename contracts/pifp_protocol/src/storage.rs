@@ -140,6 +140,7 @@ pub fn save_project(env: &Env, project: &Project) {
     let state = ProjectState {
         status: project.status.clone(),
         donation_count: project.donation_count,
+        refund_expiry: project.refund_expiry,
     };
 
     env.storage().persistent().set(&config_key, &config);
@@ -263,6 +264,7 @@ pub fn load_project(env: &Env, id: u64) -> Project {
         deadline: config.deadline,
         status: state.status,
         donation_count: state.donation_count,
+        refund_expiry: state.refund_expiry,
     }
 }
 
@@ -292,6 +294,7 @@ pub fn maybe_load_project(env: &Env, id: u64) -> Option<Project> {
         deadline: config.deadline,
         status: state.status,
         donation_count: state.donation_count,
+        refund_expiry: state.refund_expiry,
     })
 }
 

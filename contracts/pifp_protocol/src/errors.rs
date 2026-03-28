@@ -31,6 +31,8 @@
 //! | 21   | `ProjectNotExpired`      | Refund or expire attempted before the deadline has passed   |
 //! | 22   | `InvalidTransition`      | State-machine transition not allowed (e.g. expiring a Completed project) |
 //! | 23   | `TokenNotAccepted`       | Deposit attempted with a token not in the project's accepted list |
+//! | 24   | `RefundWindowActive`     | Creator tried to reclaim funds before the 6-month refund window expired |
+//! | 25   | `RefundWindowExpired`    | Donor tried to refund after the 6-month refund window expired |
 
 use soroban_sdk::contracterror;
 
@@ -111,4 +113,10 @@ pub enum Error {
 
     /// The deposit token is not in the project's `accepted_tokens` list.
     TokenNotAccepted = 23,
+
+    /// The donor refund window is still active; creator cannot reclaim yet.
+    RefundWindowActive = 24,
+
+    /// The donor refund window has expired; donors can no longer claim refunds.
+    RefundWindowExpired = 25,
 }

@@ -27,6 +27,11 @@
 
 use soroban_sdk::{contract, contractimpl, panic_with_error, token, Address, BytesN, Env, Vec};
 
+/// Refund window: 6 months (in seconds) after a project enters a terminal
+/// refundable state (Expired or Cancelled).  Donors must claim refunds within
+/// this window; after it passes, the creator may reclaim unclaimed funds.
+const REFUND_WINDOW: u64 = 6 * 30 * 24 * 60 * 60; // 15_552_000 seconds
+
 pub mod errors;
 pub mod events;
 pub mod invariants_checker;
@@ -51,6 +56,8 @@ mod test_events;
 mod test_expire;
 #[cfg(test)]
 mod test_refund;
+#[cfg(test)]
+mod test_reclaim;
 #[cfg(test)]
 mod test_utils;
 
@@ -207,6 +214,7 @@ impl PifpProtocol {
             deadline,
             status: ProjectStatus::Funding,
             donation_count: 0,
+            refund_expiry: 0,
         };
 
         save_project(&env, &project);
@@ -263,6 +271,7 @@ impl PifpProtocol {
         if env.ledger().timestamp() >= config.deadline {
             if matches!(state.status, ProjectStatus::Funding | ProjectStatus::Active) {
                 state.status = ProjectStatus::Expired;
+                state.refund_expiry = env.ledger().timestamp() + REFUND_WINDOW;
                 save_project_state(&env, project_id, &state);
             }
             panic_with_error!(&env, Error::ProjectExpired);
@@ -343,6 +352,7 @@ impl PifpProtocol {
             && matches!(state.status, ProjectStatus::Funding | ProjectStatus::Active)
         {
             state.status = ProjectStatus::Expired;
+            state.refund_expiry = env.ledger().timestamp() + REFUND_WINDOW;
             save_project_state(&env, project_id, &state);
             panic_with_error!(&env, Error::ProjectExpired);
         }
@@ -358,11 +368,16 @@ impl PifpProtocol {
         }
 
         state.status = ProjectStatus::Cancelled;
+        state.refund_expiry = env.ledger().timestamp() + REFUND_WINDOW;
         save_project_state(&env, project_id, &state);
         events::emit_project_cancelled(&env, project_id, caller);
     }
 
     /// Refund a donator from a cancelled or expired project that was not verified.
+    ///
+    /// Donors must claim their refund within the 6-month refund window.
+    /// After the window expires, only the creator may reclaim unclaimed funds
+    /// via [`reclaim_expired_funds`].
     pub fn refund(env: Env, donator: Address, project_id: u64, token: Address) {
         donator.require_auth();
 
@@ -372,6 +387,7 @@ impl PifpProtocol {
             && matches!(state.status, ProjectStatus::Funding | ProjectStatus::Active)
         {
             state.status = ProjectStatus::Expired;
+            state.refund_expiry = env.ledger().timestamp() + REFUND_WINDOW;
             save_project_state(&env, project_id, &state);
         }
 
@@ -380,6 +396,11 @@ impl PifpProtocol {
             ProjectStatus::Expired | ProjectStatus::Cancelled
         ) {
             panic_with_error!(&env, Error::ProjectNotExpired);
+        }
+
+        // Block refunds after the refund window has expired.
+        if state.refund_expiry > 0 && env.ledger().timestamp() >= state.refund_expiry {
+            panic_with_error!(&env, Error::RefundWindowExpired);
         }
 
         let refund_amount = storage::get_donator_balance(&env, project_id, &token, &donator);
@@ -436,6 +457,7 @@ impl PifpProtocol {
             && matches!(state.status, ProjectStatus::Funding | ProjectStatus::Active)
         {
             state.status = ProjectStatus::Expired;
+            state.refund_expiry = env.ledger().timestamp() + REFUND_WINDOW;
             save_project_state(&env, project_id, &state);
             panic_with_error!(&env, Error::ProjectExpired);
         }
@@ -503,10 +525,63 @@ impl PifpProtocol {
 
         // Update status and save.
         state.status = ProjectStatus::Expired;
+        state.refund_expiry = env.ledger().timestamp() + REFUND_WINDOW;
         save_project_state(&env, project_id, &state);
 
         // Standardized event emission.
         events::emit_project_expired(&env, project_id, config.deadline);
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // Donor Refund Expiry
+    // ─────────────────────────────────────────────────────────
+
+    /// Reclaim unclaimed donor funds after the 6-month refund window has expired.
+    ///
+    /// Only the project creator may call this, and only for projects that are
+    /// `Expired` or `Cancelled` whose `refund_expiry` timestamp has passed.
+    /// For each accepted token, any remaining balance is transferred to the creator.
+    pub fn reclaim_expired_funds(env: Env, creator: Address, project_id: u64) {
+        Self::require_not_paused(&env);
+        creator.require_auth();
+
+        let (config, state) = load_project_pair(&env, project_id);
+
+        // Only the project creator may reclaim.
+        if creator != config.creator {
+            panic_with_error!(&env, Error::NotAuthorized);
+        }
+
+        // Project must be in a terminal refundable state.
+        if !matches!(
+            state.status,
+            ProjectStatus::Expired | ProjectStatus::Cancelled
+        ) {
+            panic_with_error!(&env, Error::InvalidTransition);
+        }
+
+        // The refund window must have expired.
+        if state.refund_expiry == 0 || env.ledger().timestamp() < state.refund_expiry {
+            panic_with_error!(&env, Error::RefundWindowActive);
+        }
+
+        // Drain remaining balances for each accepted token.
+        let contract_address = env.current_contract_address();
+        for token in config.accepted_tokens.iter() {
+            let balance = drain_token_balance(&env, project_id, &token);
+            if balance > 0 {
+                let token_client = token::Client::new(&env, &token);
+                token_client.transfer(&contract_address, &config.creator, &balance);
+
+                events::emit_expired_funds_reclaimed(
+                    &env,
+                    project_id,
+                    config.creator.clone(),
+                    token,
+                    balance,
+                );
+            }
+        }
     }
 
     // ─────────────────────────────────────────────────────────
